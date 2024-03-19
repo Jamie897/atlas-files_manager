@@ -1,11 +1,11 @@
-// task 9 - image generator
+// Task9
 const Bull = require('bull');
 const { ObjectId } = require('mongodb');
 const imageThumbnail = require('image-thumbnail');
 const fs = require('fs');
 const dbClient = require('./utils/db');
 
-// create new bull queue
+
 const fileQueue = new Bull('thumbnail generator');
 
 // generate thumbnail based on path/location and options
@@ -30,8 +30,7 @@ fileQueue.process(async (job, done) => {
     throw new Error('Missing userId');
   }
 
-  // search DB files collection for document
-  // based on fileId and userId
+  
   const fileDoc = await dbClient.db.collection('files').findOne({
     _id: ObjectId(fileId),
     userId: ObjectId(userId),
@@ -41,7 +40,7 @@ fileQueue.process(async (job, done) => {
     throw new Error('File not found');
   }
 
-  // generate thumbnails
+
   createThumbnail(fileDoc.localPath, { width: 500 });
   createThumbnail(fileDoc.localPath, { width: 250 });
   createThumbnail(fileDoc.localPath, { width: 100 });

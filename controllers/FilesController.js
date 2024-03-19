@@ -1,4 +1,4 @@
-// Task 5 First File, 6 Get and list file, 7 File publish/unpublish, 8 File data, 9 Image Thumbnails
+// Task 9
 const { v4: uuidv4 } = require('uuid');
 const mongodb = require('mongodb');
 const fsp = require('fs').promises;
@@ -17,7 +17,7 @@ async function getUserIdFromToken(token) {
   return new mongodb.ObjectID(userIdString);
 }
 
-// Extract and validate the token and file metadata from the request
+
 class FilesController {
   static async postUpload(req, res) {
     const token = req.header('X-Token');
@@ -65,10 +65,10 @@ class FilesController {
         return res.status(400).json({ error: 'Parent is not a folder' });
       }
     } else {
-      parentId = 0; // Set parentId to integer 0 if it's the root
+      parentId = 0; 
     }
 
-    // Prepare new file document
+    
     const newFile = {
       userId,
       name,
@@ -77,7 +77,7 @@ class FilesController {
       parentId,
     };
 
-    // Add a job to bull queue for image generator
+    
     if (type === 'image') {
       const userIdString = await Redis.get(`auth_${token}`);
       await fileQueue.add({
@@ -137,7 +137,7 @@ class FilesController {
     }
 
     try {
-      // Attempt to retrieve user's id from token
+      
       const userId = await getUserIdFromToken(token);
 
       // Fetch the specified file
