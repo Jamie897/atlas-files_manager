@@ -7,7 +7,6 @@ const Mongo = require('../utils/db');
 const Redis = require('../utils/redis');
 const { fileQueue } = require('../worker');
 
-// Helper function to retrieve user ID from a given token
 async function getUserIdFromToken(token) {
     const userIdString = await Redis.get(`auth_${token}`);
     if (!userIdString) {
@@ -23,141 +22,110 @@ class FilesController {
             return res.status(401).json({ error: 'Unauthorized' });
         }
 
-        // Retrieve user ID from token
-        const userIdString = await Redis.get(`auth_${token}`);
-        if (!userIdString) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
-        const userId = new mongodb.ObjectID(userIdString);
-
-        // Extract file metadata from request body
-        const {
-            name, type, data, isPublic = false,
-        } = req.body;
-        let { parentId = '0' } = req.body;
-
-        // Validate file metadata
-        if (!name) {
-            return res.status(400).json({ error: 'Missing name' });
-        }
-        if (!['folder', 'file', 'image'].includes(type)) {
-            return res.status(400).json({ error: 'Missing type' });
-        }
-        if (!data && type !== 'folder') {
-            return res.status(400).json({ error: 'Missing data' });
-        }
-
-        // Handle parentId
-        if (parentId !== '0') {
-            try {
-                parentId = new mongodb.ObjectID(parentId);
-            } catch (e) {
-                return res.status(400).json({ error: 'Parent not found' });
-            }
-
-            const parent = await Mongo.db.collection('files').findOne({ _id: parentId, userId });
-            if (!parent) {
-                return res.status(400).json({ error: 'Parent not found' });
-            }
-            if (parent.type !== 'folder') {
-                return res.status(400).json({ error: 'Parent is not a folder' });
-            }
-        } else {
-            parentId = 0;
-        }
-
-        const newFile = {
-            userId,
-            name,
-            type,
-            isPublic,
-            parentId,
-        };
-
-        if (type === 'image') {
-            await fileQueue.add({
-                userId: userIdString,
-                fileId: newFile.insertedId.toString(),
-            });
-        }
-
         try {
-            if (type === 'folder' || type === 'file' || type === 'image') {
-                // Save folder, file or image to DB
-                if (type === 'folder') {
-                    const result = await Mongo.db.collection('files').insertOne(newFile);
-                    return res.status(201).json({
-                        id: result.insertedId.toString(),
-                        userId: userId.toString(),
-                        name,
-                        type,
-                        isPublic,
-                        parentId,
-                    });
-                } else if (type === 'file' || type === 'image') {
-                    // Save file or image to disk and DB
-                    const fileData = Buffer.from(data, 'base64');
-                    const folderPath = process.env.FOLDER_PATH || '/tmp/files_manager';
-                    await fsp.mkdir(folderPath, { recursive: true });
-                    const filePath = `${folderPath}/${uuidv4()}`;
-                    await fsp.writeFile(filePath, fileData);
-                    newFile.localPath = filePath;
-                    const result = await Mongo.db.collection('files').insertOne(newFile);
-                    return res.status(201).json({
-                        id: result.insertedId.toString(),
-                        userId: userId.toString(),
-                        name,
-                        type,
-                        isPublic,
-                        parentId: parentId === 0 ? '0' : parentId.toString(),
-                        localPath: filePath,
-                    });
-                }
+            const userId = await getUserIdFromToken(token);
+            const { name, type, data, isPublic = false } = req.body;
+            let { parentId = '0' } = req.body;
+
+            if (!name) {
+                return res.status(400).json({ error: 'Missing name' });
             }
+            if (!['folder', 'file', 'image'].includes(type)) {
+                return res.status(400).json({ error: 'Missing type' });
+            }
+            if (!data && type !== 'folder') {
+                return res.status(400).json({ error: 'Missing data' });
+            }
+
+            if (parentId !== '0') {
+                parentId = new mongodb.ObjectID(parentId);
+                const parent = await Mongo.db.collection('files').findOne({ _id: parentId, userId });
+                if (!parent || parent.type !== 'folder') {
+                    return res.status(400).json({ error: 'Invalid parent' });
+                }
+            } else {
+                parentId = 0;
+            }
+
+            const newFile = {
+                userId,
+                name,
+                type,
+                isPublic,
+                parentId,
+            };
+
+            if (type === 'image') {
+                await fileQueue.add({
+                    userId: userId.toString(),
+                    fileId: newFile.insertedId.toString(),
+                });
+            }
+
+            let result;
+            if (type === 'folder') {
+                result = await Mongo.db.collection('files').insertOne(newFile);
+            } else if (type === 'file' || type === 'image') {
+                const fileData = Buffer.from(data, 'base64');
+                const folderPath = process.env.FOLDER_PATH || '/tmp/files_manager';
+                await fsp.mkdir(folderPath, { recursive: true });
+                const filePath = `${folderPath}/${uuidv4()}`;
+                await fsp.writeFile(filePath, fileData);
+                newFile.localPath = filePath;
+                result = await Mongo.db.collection('files').insertOne(newFile);
+            }
+
+            return res.status(201).json({
+                id: result.insertedId.toString(),
+                userId: userId.toString(),
+                name,
+                type,
+                isPublic,
+                parentId: parentId === 0 ? '0' : parentId.toString(),
+                localPath: result.localPath || '',
+            });
         } catch (error) {
             console.error(error);
             return res.status(500).json({ error: 'Server error' });
         }
-        return res.status(400).json({ error: 'Wrong type' });
     }
 
     static async getShow(req, res) {
         const fileId = req.params.id;
         const token = req.header('X-Token');
 
-        // Ensure the token is provided
         if (!token) {
-            return res.status(401).send({ error: 'Unauthorized' });
+            return res.status(401).json({ error: 'Unauthorized' });
         }
 
         try {
             const userId = await getUserIdFromToken(token);
-
-            // Fetch the specified file
             const file = await Mongo.db.collection('files').findOne({
                 _id: new mongodb.ObjectID(fileId),
                 userId,
             });
 
             if (!file) {
-                return res.status(404).send({ error: 'Not found' });
+                return res.status(404).json({ error: 'Not found' });
             }
 
-            return res.status(200).send(file);
+            return res.status(200).json(file);
         } catch (error) {
             console.error(error);
             if (error.message === 'Unauthorized') {
-                return res.status(401).send({ error: 'Unauthorized' });
+                return res.status(401).json({ error: 'Unauthorized' });
             }
-            // Handle other potential errors
-            return res.status(500).send({ error: 'Server error' });
+            return res.status(500).json({ error: 'Server error' });
         }
     }
 
     static async getIndex(req, res) {
         const token = req.header('X-Token');
 
-        // Check for token and retrieve user ID or return 401 Unauthorized
+        if (!token) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+
         let userId;
         try {
             userId = await getUserIdFromToken(token);
@@ -166,12 +134,10 @@ class FilesController {
             return res.status(401).json({ error: 'Unauthorized' });
         }
 
-        // Extract parentId and page from query string
         const { parentId = '0', page = '0' } = req.query;
         const skip = parseInt(page, 10) * 20;
 
         try {
-            // Construct query with parentId
             const matchQuery = { userId };
             if (parentId !== '0') {
                 matchQuery.parentId = new mongodb.ObjectID(parentId);
@@ -179,14 +145,12 @@ class FilesController {
                 matchQuery.parentId = '0';
             }
 
-            // Use aggregation for pagination
             const files = await Mongo.db.collection('files').aggregate([
                 { $match: matchQuery },
                 { $skip: skip },
                 { $limit: 20 },
             ]).toArray();
 
-            // Convert MongoDB ObjectIDs to strings
             const responseFiles = files.map((file) => ({
                 id: file._id,
                 userId: file.userId,
@@ -196,10 +160,10 @@ class FilesController {
                 parentId: file.parentId,
             }));
 
-            return res.status(200).send(responseFiles);
+            return res.status(200).json(responseFiles);
         } catch (error) {
             console.error(error);
-            return res.status(500).send({ error: 'Server error' });
+            return res.status(500).json({ error: 'Server error' });
         }
     }
 
@@ -207,9 +171,12 @@ class FilesController {
         const fileId = req.params.id;
         const token = req.header('X-Token');
 
+        if (!token) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+
         try {
             const userId = await getUserIdFromToken(token);
-
             const file = await Mongo.db.collection('files').findOneAndUpdate(
                 { _id: new mongodb.ObjectID(fileId), userId },
                 { $set: { isPublic: true } },
@@ -217,16 +184,16 @@ class FilesController {
             );
 
             if (!file.value) {
-                return res.status(404).send({ error: 'Not found' });
+                return res.status(404).json({ error: 'Not found' });
             }
 
-            return res.status(200).send(file.value);
+            return res.status(200).json(file.value);
         } catch (error) {
             console.error(error);
             if (error.message === 'Unauthorized') {
-                return res.status(401).send({ error: 'Unauthorized' });
+                return res.status(401).json({ error: 'Unauthorized' });
             }
-            return res.status(500).send({ error: 'Server error' });
+            return res.status(500).json({ error: 'Server error' });
         }
     }
 
@@ -234,9 +201,12 @@ class FilesController {
         const fileId = req.params.id;
         const token = req.header('X-Token');
 
+        if (!token) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+
         try {
             const userId = await getUserIdFromToken(token);
-
             const file = await Mongo.db.collection('files').findOneAndUpdate(
                 { _id: new mongodb.ObjectID(fileId), userId },
                 { $set: { isPublic: false } },
@@ -244,16 +214,16 @@ class FilesController {
             );
 
             if (!file.value) {
-                return res.status(404).send({ error: 'Not found' });
+                return res.status(404).json({ error: 'Not found' });
             }
 
-            return res.status(200).send(file.value);
+            return res.status(200).json(file.value);
         } catch (error) {
             console.error(error);
             if (error.message === 'Unauthorized') {
-                return res.status(401).send({ error: 'Unauthorized' });
+                return res.status(401).json({ error: 'Unauthorized' });
             }
-            return res.status(500).send({ error: 'Server error' });
+            return res.status(500).json({ error: 'Server error' });
         }
     }
 
@@ -261,15 +231,12 @@ class FilesController {
         const fileId = req.params.id;
         const token = req.header('X-Token');
 
-        // Ensure the token is provided
         if (!token) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
 
         try {
             const userId = await getUserIdFromToken(token);
-
-            // Fetch the specified file
             const file = await Mongo.db.collection('files').findOne({
                 _id: new mongodb.ObjectID(fileId),
                 $or: [
@@ -282,22 +249,19 @@ class FilesController {
                 return res.status(404).json({ error: 'Not found' });
             }
 
-            // Check if the file is a folder
             if (file.type === 'folder') {
                 return res.status(400).json({ error: "A folder doesn't have content" });
             }
 
-            // Check if the file exists on the server
             if (!fs.existsSync(file.localPath)) {
                 return res.status(404).json({ error: 'Not found' });
             }
 
-            // Serve the file with the correct MIME type
             res.type(mime.lookup(file.name) || 'application/octet-stream');
             fs.createReadStream(file.localPath).pipe(res);
         } catch (error) {
             console.error(error);
-            res.status(500).json({ error: 'Server error' });
+            return res.status(500).json({ error: 'Server error' });
         }
     }
 }
